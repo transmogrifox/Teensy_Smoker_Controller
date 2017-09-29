@@ -1,5 +1,16 @@
 //
-// Hysteretic temperature controller.
+// Hysteretic temperature controller sensing a thermistor
+//
+//                 NTC
+//               Thermistor
+//  Vref "vref"---/\/\/-------->ADC
+//                          |
+//                          \
+//                          /
+//                          \  Rs "rs"
+//                          /
+//                          |
+//                         GND
 //
 //  Calibration info:
 //  Elevation   Boiling Point of Water ^F
@@ -8,6 +19,11 @@
 //  3000          206.2
 //
 //  Target elevation:  2770 ft ==> 206.66 ^F
+//  Calibrate using actual measured resistance and table from manufacturer:
+//      Cup of ice water, R = 32650 ohms
+//      Boiling water at 2770 ft, R = 741.2
+//      Offset and scale measured resistance value to match mfr table at 32F and 206.6F
+//      The offset/scaled resistor value will be used in temperature calculation.
 //
 
 
@@ -24,9 +40,9 @@
 #define OFST            -0.5         //Degrees F for final output error biasing
 
 //Fixed point processing defs
-#define SAMPLE_RATE     10
+#define SAMPLE_RATE     32
 #define SHIFT           12          // Define decimal point location for IIR
-#define ADC_TC          6           // a0 = (2^ADC_TC - 1) / 2^ADC_TC
+#define ADC_TC          8           // a0 = (2^ADC_TC - 1) / 2^ADC_TC
                                     // This results in a time constant of (2^ADC_TC)/SAMPLE_RATE
                                     // For SAMPLE_RATE = 10, ADC_TC = 6,
                                     // Tau = 64/10 = 6.4 seconds
@@ -163,15 +179,14 @@ void simulate_control_system(float set_point)
 
     unsigned int i = 0;
     unsigned int j = 0;
-    unsigned int sim_time = 60; //Minutes
-    unsigned int sample_interval = 100;  //milliseconds
-    unsigned int stop_count = 120*sim_time*(1000/sample_interval);
+    unsigned int sim_time = 60.0; //Minutes
+    unsigned int stop_count = 60*sim_time*SAMPLE_RATE;
 
-    float ambient_temp = 70; //degreesF
+    float ambient_temp = 40; //degreesF
 
     //Digital model of smoker (crude)
     float tc = 3600.0; //Time constant for thermal response time on smoker temp
-    float fs = (float) (1000/sample_interval);
+    float fs = SAMPLE_RATE;
     float a0 = expf(-1.0/(tc*fs)); //1p RC response time
     float pv_temp = ambient_temp; //temperature measured in smoker
     float power = 1500.0; // Heater element wattage
@@ -187,10 +202,10 @@ void simulate_control_system(float set_point)
         pv_volt = temp_to_volt(&temp_sensor_sim, pv_temp);
         pv_cnt = volt_to_counts(&temp_sensor_sim, pv_volt, 12);
         run_process_control(&temp_sensor_sim, pv_cnt);
-        if(j >= 20)
+        if(j >= SAMPLE_RATE)
         {
             printf("%f\t%f\t%f\t%u\t%d\t%f\t%f\t%u\t%u\n",
-            ((float)i)/600.0, pv_temp, pv_volt, pv_cnt, temp_sensor_sim.throttle,
+            ((float)i)/(SAMPLE_RATE*60.0), pv_temp, pv_volt, pv_cnt, temp_sensor_sim.throttle,
             volt_to_temp(&temp_sensor_sim, 3.3*((float) temp_sensor_sim.set_point_min_cnts)/powf(2.0, SHIFT + 12.0)) + 0.5,
             volt_to_temp(&temp_sensor_sim, 3.3*((float) temp_sensor_sim.set_point_max_cnts)/powf(2.0, SHIFT + 12.0)) + 0.5,
             (temp_sensor_sim.set_point_min_cnts>>SHIFT), temp_sensor_sim.set_point_max_cnts>>SHIFT);
@@ -202,7 +217,7 @@ void simulate_control_system(float set_point)
 
 int main(void)
 {
-    simulate_control_system(165.0);
+    simulate_control_system(200.0);
 
     return 0;
 
