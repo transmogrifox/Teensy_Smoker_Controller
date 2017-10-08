@@ -35,11 +35,11 @@
 #define R0              835.4       //Thermistor resistance at T0
 #define T0              93          //T0 in ^C
 #define VREF            3.3         //Reference voltage
-#define RS              809         //Series reference resistor
+#define RS              666         //Series reference resistor
 #define OFST            -0.5         //Degrees F for final output error biasing
 
 //Fixed point processing defs
-#define SAMPLE_RATE     32
+#define SAMPLE_RATE     33
 #define SHIFT           12          // Define decimal point location for IIR
 #define ADC_TC          6           // a0 = (2^ADC_TC - 1) / 2^ADC_TC
                                     // This results in a time constant of (2^ADC_TC)/SAMPLE_RATE
@@ -176,13 +176,104 @@ void run_process_control(thstr_vars* th, uint32_t adc_cnt)
 }
 
 //
+// Switch debouncing routine
+// ...because I have my own way I like to do this
+//
+static const int run_switch = 11;
+static const int mode_switch = 12;
+static const uint8_t switch_cnt = 10;
+
+static volatile uint8_t run_integrator;
+static volatile uint8_t mode_integrator;
+static volatile bool run_edge_rising;
+static volatile bool run_edge_falling;
+static volatile bool mode_edge_rising;
+static volatile bool mode_edge_falling;
+static volatile bool run_state;
+static volatile bool mode_state;
+
+elapsedMillis switch_scan_timer;
+
+void init_switches()
+{
+  pinMode(run_switch, INPUT);
+  pinMode(mode_switch, INPUT);
+
+  switch_scan_timer = 0;
+}
+
+// This is such a hackish way to do this I should be embarrassed...
+// ...but I'm not.  Just want to get this thing working.
+void run_debounce_switches()
+{
+  if(digitalRead(run_switch))
+  {
+    run_integrator++;
+    if(run_integrator >= switch_cnt)
+    {
+      run_integrator = switch_cnt;
+      if(!run_state)
+      {
+        run_edge_falling = false;
+        run_edge_rising = true;
+      }
+      run_state = true;
+    }
+  }
+  else
+  {
+    run_integrator--;
+    if(run_integrator < 1) 
+    {
+      run_integrator = 1;
+      if(run_state)
+      {
+        run_edge_falling = true;
+        run_edge_rising = false;
+      }
+      run_state = false;
+    }
+  }
+  
+  if(digitalRead(mode_switch))
+  {
+    mode_integrator++;
+    if(mode_integrator >= switch_cnt)
+    {
+      mode_integrator = switch_cnt;
+      if(!mode_state)
+      {
+        mode_edge_falling = false;
+        mode_edge_rising = true;
+      }
+      mode_state = true;
+    }
+  }
+  else
+  {
+    mode_integrator--;
+    if(mode_integrator < 1) 
+    {
+      mode_integrator = 1;
+      if(mode_state)
+      {
+        mode_edge_falling = true;
+        mode_edge_rising = false;
+      }
+      mode_state = false;
+    }
+  }    
+  
+}
+
+//
 //  Main Program Code
 //  Handles ADC read interval and output printing functions
 //
 
 static thstr_vars temp_sensor2;
-volatile int32_t counter;
-volatile uint32_t val;
+static volatile int32_t counter;
+static volatile uint32_t val;
 
 elapsedMillis sample_timer;
 elapsedMillis run_time;
@@ -196,9 +287,8 @@ static volatile bool toggle_blue;
 
 static uint32_t sample_period;
 
-volatile bool led_state;
-const int ledPin = 13;
-const int heaterPin = 12;
+static volatile bool led_state;
+static const int ledPin = 13;
 
 
 // Serial LCD Output
@@ -212,7 +302,9 @@ void setup()
   counter = 0;
   led_state = false;
   pinMode(ledPin, OUTPUT);
-  pinMode(heaterPin, OUTPUT);
+
+  //Setup for reading input switches
+  init_switches();
 
   sample_period = 1000/SAMPLE_RATE;
 
@@ -229,7 +321,10 @@ void setup()
   toggle_display = false;
   toggle_blue = true;
   toggle_red = true;
-
+ 
+  //Disable auto scroll mode
+  HWSERIAL.write(0xFE);
+  HWSERIAL.write(0x52);
   //Clear screen
   HWSERIAL.write(0xFE);
   HWSERIAL.write(0x58);
@@ -254,6 +349,39 @@ void setup()
 
 void loop()                     
 {
+  //
+  // Scan input switch states
+  //
+  if(switch_scan_timer >= 1)
+  {
+    switch_scan_timer = 0;
+    run_debounce_switches();
+    if(run_edge_rising)
+    {
+      Serial.println("Run Switch Released");
+      run_edge_rising = false;
+    }
+    if(run_edge_falling)
+    {
+      Serial.println("Run Switch Pressed");
+      run_edge_falling = false;
+    }
+    if(mode_edge_rising)
+    {
+      Serial.println("Mode Switch Released");
+      mode_edge_rising = false;
+    }
+    if(mode_edge_falling)
+    {
+      Serial.println("Mode Switch Pressed");
+      mode_edge_falling = false;
+    }
+
+  }
+  
+  //
+  //Run the clock
+  //
   if(run_time >= 1000)
   {
     
@@ -275,30 +403,43 @@ void loop()
       }
     }
   }
+
+  //
+  // Sample the temperature sensor
+  //
   if(sample_timer >= sample_period)
   {
+    // DEBUG:  To see if ever the loop fails to complete within the same sample_period
     sample_timer = 0;
+    
+    //Scan temperature set point pot
+        if(!mode_state)
+    {
+      float temp_set = analogRead(1)/4095.0;
+      temp_set = 50.0 + 300.0*temp_set;
+      set_process_control_target(&temp_sensor2, temp_set, 4.0, 12);
+    }
+    
+    //Run process controller on the temperature sensor
     run_process_control(&temp_sensor2, (uint32_t) analogRead(2));
 
-    if(counter++ > 33)
+    if(counter++ > SAMPLE_RATE)
     {
-      char digit[7];
+      char digit[17];
       float current_temperature = count_to_temp(&temp_sensor2, temp_sensor2.process_variable_cnts, 12+SHIFT);
       counter = 0;
-      Serial.print("analog 3 temp is: ");
-      Serial.println(current_temperature);
-      Serial.println(temp_sensor2.process_variable_cnts);
+
+      Serial.print(current_temperature);
 
       //Print Temperature
       HWSERIAL.write(0xFE);
       HWSERIAL.write(0x48);
-      delay(10);
-      HWSERIAL.print("PV: ");
+      //delay(10);
 
       //Format temperature output (sprint with float seems to not work correctly on LC, so conversion to ints is being used)
-      sprintf(digit, "%03d", (int) (floorf(current_temperature)) );
+      HWSERIAL.print("PV: ");
+      sprintf(digit, "%03d.", (int) (floorf(current_temperature)) );
       HWSERIAL.print(digit);
-      HWSERIAL.print(".");
       sprintf(digit, "%01d", (int) ((current_temperature - floorf(current_temperature))*10.0) );
       HWSERIAL.print(digit);
 
@@ -310,37 +451,41 @@ void loop()
       {
         toggle_display = false;
         //Print Time
-        sprintf(digit, "%02u", days);
+        sprintf(digit, "%02u d, ", days);
         HWSERIAL.print(digit);
-        HWSERIAL.print(" d, ");
-        sprintf(digit, "%02u", hours);
+        sprintf(digit, "%02u:", hours);
         HWSERIAL.print(digit);
-        HWSERIAL.print(":");
-        sprintf(digit, "%02u", minutes);
+        sprintf(digit, "%02u:", minutes);
         HWSERIAL.print(digit);
-        HWSERIAL.print(":");
         sprintf(digit, "%02u", seconds);
-        HWSERIAL.print(digit);
+        HWSERIAL.print(digit);      
+
+        sprintf(digit, " %03d.", (int) (floorf(temp_sensor2.set_point_degreesF)) );
+        Serial.print(digit);
+        sprintf(digit, "%01d", (int) ((temp_sensor2.set_point_degreesF - floorf(temp_sensor2.set_point_degreesF))*10.0) );
+        Serial.println(digit);
       } else
       {
         toggle_display = true;
         //Print process set point
         HWSERIAL.print("SP: ");
-        sprintf(digit, "%03d", (int) (floorf(temp_sensor2.set_point_degreesF)) );
+        sprintf(digit, "%03d.", (int) (floorf(temp_sensor2.set_point_degreesF)) );
         HWSERIAL.print(digit);
-        HWSERIAL.print(".");
+        Serial.print(" ");
+        Serial.print(digit);
         sprintf(digit, "%01d", (int) ((temp_sensor2.set_point_degreesF - floorf(temp_sensor2.set_point_degreesF))*10.0) );
         HWSERIAL.print(digit);
+        Serial.println(digit);
+        
         //Degree symbol followed by F      
         HWSERIAL.write(0xDF);
         HWSERIAL.println("F");
-        HWSERIAL.print("     ");
+        //HWSERIAL.print(" ");
       }
 
       if(temp_sensor2.throttle)
       {
         digitalWrite(ledPin, HIGH);
-        digitalWrite(heaterPin, HIGH);
 
         if(toggle_red)
         {
@@ -358,7 +503,6 @@ void loop()
       else
       {
          digitalWrite(ledPin, LOW);
-         digitalWrite(heaterPin, LOW);
 
         if(toggle_blue)
         {
@@ -372,7 +516,8 @@ void loop()
         toggle_blue = false;
         toggle_red = true;
       }
-      
+      // Debug:  to see if it ever takes more than 1ms to complete this task
+      //Serial.println(sample_timer);
     }
     
   }
