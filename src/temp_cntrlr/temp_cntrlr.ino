@@ -1,3 +1,4 @@
+/*
 //
 // Hysteretic temperature controller sensing a thermistor
 //
@@ -25,7 +26,7 @@
 //      Offset and scale measured resistance value to match mfr table at 32F and 206.6F
 //      The offset/scaled resistor value will be used in temperature calculation.
 //
-
+*/
 
 #include <math.h>
 
@@ -62,9 +63,9 @@ typedef struct thstr_vars_t
     float t_meas;
 
     //Control criteria
-    float set_point_degreesF;
+    float set_point_high_degreesF;
+    float set_point_low_degreesF;
     uint32_t set_point_max_cnts, set_point_min_cnts; //represents hysteresis in control loop
-    uint32_t set_point_curr_cnts;  //Alternates between min and max set points
     uint32_t process_variable_cnts;
     uint32_t process_variable_raw;
     float process_variable_degreesF;
@@ -73,7 +74,7 @@ typedef struct thstr_vars_t
 
 } thstr_vars;
 
-void setup_thstr(thstr_vars* th, float beta, float r0, float t0, float vref, float rs, float offset)
+void setup_thstr(thstr_vars* th, float beta, float r0, float t0, float vref, float rs, float Toffset, float rcal)
 {
     th->beta = beta;
     th->r0 = r0;
@@ -83,17 +84,17 @@ void setup_thstr(thstr_vars* th, float beta, float r0, float t0, float vref, flo
 
     th->rinf = th->r0*exp(-th->beta/th->t0);
 
-    th->offset = offset;
-    th->rcal = 1.0;
+    th->offset = Toffset;
+    th->rcal = rcal;
 
     th->r_meas = 0.0;
     th->t_meas = 0.0;
 
     //Control system variables
-    th->set_point_degreesF = 200.0;
+    th->set_point_high_degreesF = 200.0;
+    th->set_point_low_degreesF = 180.0;
     th->set_point_max_cnts = 0;
     th->set_point_min_cnts = 0;
-    th->set_point_curr_cnts = 0;
     th->process_variable_cnts = 0;
     th->process_variable_raw = 0;
     th->process_variable_degreesF = 0.0;
@@ -118,7 +119,7 @@ float count_to_temp(thstr_vars* th, uint32_t cnt, uint8_t nbits)
 float temp_to_volt(thstr_vars* th, float temp)
 {
     //convert degrees F to Kelvin
-    float t = (temp - 32.0)/1.8 + K2C;
+    float t = (temp - 32.0)/1.8 + K2C + th->offset;
     return th->rs*th->vref/(th->rinf*exp(th->beta/t) + th->rs);
 }
 
@@ -130,24 +131,23 @@ uint32_t volt_to_counts(thstr_vars* th, float volt, uint8_t nbits)
 //Set up process control set points.
 //  target is the desired center temperature.
 //  hysteresis is total min-max variation
-void set_process_control_target(thstr_vars* th, float target, float hysteresis, uint8_t nbits)
+void set_process_control_target(thstr_vars* th, float min_, float max_, uint8_t nbits)
 {
-    float hyst = hysteresis/2.0;
-    float max = temp_to_volt(th, target + hyst);
-    float min = temp_to_volt(th, target - hyst);
+    float maxval = temp_to_volt(th, max_);
+    float minval = temp_to_volt(th, min_);
     //printf("min:  %f\nmax: %f\nt: %f\n", min, max, temp_to_volt(th, target));
-    th->set_point_degreesF = target;
+    th->set_point_high_degreesF = max_;
+    th->set_point_low_degreesF = min_;
 
     // Left-shift set points to match decimal point location
     // on fixed-point ADC averaging filter
-    uint32_t tmp = volt_to_counts(th, max, nbits);
+    uint32_t tmp = volt_to_counts(th, maxval, nbits);
     tmp = tmp << SHIFT;
     th->set_point_max_cnts = tmp;
-    tmp = volt_to_counts(th, min, nbits);
+    tmp = volt_to_counts(th, minval, nbits);
     tmp = tmp << SHIFT;
     //printf("mincnt:  %f\n", volt_to_temp(th, 3.3*((float) tmp)/powf(2.0, SHIFT + 12.0)) );
     th->set_point_min_cnts = tmp;
-    th->set_point_curr_cnts = th->set_point_min_cnts;
     th->throttle = false;
 }
 
@@ -202,7 +202,7 @@ void init_switches()
   switch_scan_timer = 0;
 }
 
-// This is such a hackish way to do this I should be embarrassed...
+// This is such a hackish way to do this I should be embarrassed to make it publicly available...
 // ...but I'm not.  Just want to get this thing working.
 void run_debounce_switches()
 {
@@ -271,12 +271,25 @@ void run_debounce_switches()
 //  Handles ADC read interval and output printing functions
 //
 
+#define MAX_MODES                     4
+#define MODE_RUNNING                  0
+#define MODE_SET_MIN_TEMP             1
+#define MODE_SET_MAX_TEMP             2
+#define MODE_SET_RUN_TIME             3
+
+
 static thstr_vars temp_sensor2;
 static volatile int32_t counter;
 static volatile uint32_t val;
+static volatile bool temp_control_enabled;
+static volatile uint32_t current_mode;
+static volatile float temp_set_high;
+static volatile float temp_set_low;
 
 elapsedMillis sample_timer;
 elapsedMillis run_time;
+
+static volatile uint32_t ticker;
 static volatile uint32_t seconds;
 static volatile uint32_t minutes;
 static volatile uint32_t hours;
@@ -294,6 +307,194 @@ static const int ledPin = 13;
 // Serial LCD Output
 #define HWSERIAL Serial1
 
+void backlight_red()
+{
+  HWSERIAL.write(0xFE);
+  HWSERIAL.write(0xD5);
+  HWSERIAL.write(225);
+  HWSERIAL.write(10);
+  HWSERIAL.write(10);
+}
+
+void backlight_blue()
+{
+  HWSERIAL.write(0xFE);
+  HWSERIAL.write(0xD5);
+  HWSERIAL.write(160);
+  HWSERIAL.write(20);
+  HWSERIAL.write(210);
+}
+
+void backlight_green()
+{
+  HWSERIAL.write(0xFE);
+  HWSERIAL.write(0xD5);
+  HWSERIAL.write(20);
+  HWSERIAL.write(180);
+  HWSERIAL.write(20);
+}
+
+void lcd_home()
+{
+  //Home
+  HWSERIAL.write(0xFE);
+  HWSERIAL.write(0x48);
+}
+
+void lcd_clear_home()
+{
+  HWSERIAL.write(0xFE);
+  HWSERIAL.write(0x58);
+  delay(10);
+  //Home
+  lcd_home();
+}
+
+void lcd_print_temperature_F(float degreesF)
+{
+  char digit[17];
+  sprintf(digit, "%03d.", (int) (floorf(degreesF)) );
+  HWSERIAL.print(digit);
+  sprintf(digit, "%01d", (int) ((degreesF - floorf(degreesF))*10.0) );
+  HWSERIAL.print(digit);
+
+  //Degree symbol followed by F      
+  HWSERIAL.write(0xDF);
+  HWSERIAL.print("F");
+}
+
+void apply_process_state(thstr_vars *th)
+{
+    if(th->throttle)
+    {
+      if(temp_control_enabled)
+        digitalWrite(ledPin, HIGH);
+      else
+        digitalWrite(ledPin, LOW);
+
+      if(toggle_red && temp_control_enabled)
+      {
+        //RGB red
+        backlight_red();
+        Serial.println("Change red");
+      }
+      toggle_red = false;
+      toggle_blue = true;
+      
+    }
+    else
+    {
+       digitalWrite(ledPin, LOW);
+
+      if(temp_control_enabled && toggle_blue)
+      {
+        //RGB Red
+        backlight_blue();
+        Serial.println("Change Blue");
+      }
+      toggle_blue = false;
+      toggle_red = true;
+    }
+}
+
+  
+void secs2dhms(uint32_t ticks_)
+{
+    uint32_t ds, hrs, mns, scs;
+    uint32_t ticks = ticks_;
+    ds=hrs=mns=scs = 0;
+
+    if(ticks >= 3600*24)
+    {
+        ds = ticks/(3600*24);
+        ticks %= (3600*24);
+    }
+
+    if(ticks >= 3600)
+    {
+        hrs = ticks/3600;
+        ticks %= 3600;
+    }
+
+    if(ticks >= 60)
+    {
+        mns = ticks/60;
+        ticks %= 60;
+    }
+
+    scs = ticks;
+
+    days = ds;
+    hours = hrs;
+    minutes = mns;
+    seconds = scs;
+}
+
+void display_running_process_state(thstr_vars *th)
+{
+  char digit[17];
+  float current_temperature = count_to_temp(th, th->process_variable_cnts, 12+SHIFT);
+  counter = 0;
+
+  Serial.print(current_temperature);
+
+  //Print Temperature
+  HWSERIAL.write(0xFE);
+  HWSERIAL.write(0x48);
+  //delay(10);
+
+  //Format temperature output (sprint with float seems to not work correctly on LC, so conversion to ints is being used)
+  HWSERIAL.print("PV: ");
+  lcd_print_temperature_F(current_temperature);
+  HWSERIAL.println();
+
+  if(toggle_display && temp_control_enabled)
+  {
+    toggle_display = false;
+    //Print Time
+     secs2dhms(ticker);
+    sprintf(digit, "%02u d, ", (unsigned) days);
+    HWSERIAL.print(digit);
+    sprintf(digit, "%02u:", (unsigned) hours);
+    HWSERIAL.print(digit);
+    sprintf(digit, "%02u:", (unsigned) minutes);
+    HWSERIAL.print(digit);
+    sprintf(digit, "%02u  ", (unsigned) seconds);
+    HWSERIAL.print(digit);    
+
+    sprintf(digit, " %03d.", (int) (floorf(th->set_point_high_degreesF)) );
+    Serial.print(digit);
+    sprintf(digit, "%01d", (int) ((th->set_point_high_degreesF - floorf(th->set_point_high_degreesF))*10.0) );
+    Serial.print(digit);
+    Serial.print("  ");
+
+    sprintf(digit, " %03d.", (int) (floorf(th->set_point_low_degreesF)) );
+    Serial.print(digit);
+    sprintf(digit, "%01d", (int) ((th->set_point_low_degreesF - floorf(th->set_point_low_degreesF))*10.0) );
+    Serial.println(digit);
+  } else
+  {
+    toggle_display = true;
+    //Print process set point
+    lcd_print_temperature_F(th->set_point_low_degreesF);
+    HWSERIAL.print(" ");
+    lcd_print_temperature_F(th->set_point_high_degreesF);
+  }
+
+}
+
+
+void run_clock()
+{
+  if(run_time >= 1000)
+  {
+    if(ticker > 0)
+      ticker--;
+    secs2dhms(ticker);
+   run_time = 0;
+  }
+}
+
 void setup()
 {   
   analogReadResolution(12);           
@@ -301,6 +502,7 @@ void setup()
   HWSERIAL.begin(9600);
   counter = 0;
   led_state = false;
+  temp_control_enabled = false;
   pinMode(ledPin, OUTPUT);
 
   //Setup for reading input switches
@@ -308,12 +510,15 @@ void setup()
 
   sample_period = 1000/SAMPLE_RATE;
 
-  setup_thstr(&temp_sensor2, B, R0, T0, VREF, RS, OFST);
-  set_process_control_target(&temp_sensor2, 200.0, 4.0, 12);
+  temp_set_high = 182;
+  temp_set_low = 178;
+  setup_thstr(&temp_sensor2, B, R0, T0, VREF, RS, OFST, 0.99);
+  set_process_control_target(&temp_sensor2, temp_set_low, temp_set_high, 12);
 
   //Clock
   run_time = 0;
   sample_timer = 0;
+  ticker = 0;
   seconds = 0;
   minutes = 0;
   hours = 0;
@@ -321,34 +526,26 @@ void setup()
   toggle_display = false;
   toggle_blue = true;
   toggle_red = true;
+  current_mode = 0;
  
   //Disable auto scroll mode
   HWSERIAL.write(0xFE);
   HWSERIAL.write(0x52);
   //Clear screen
-  HWSERIAL.write(0xFE);
-  HWSERIAL.write(0x58);
-  delay(10);
-  //Home
-  HWSERIAL.write(0xFE);
-  HWSERIAL.write(0x48);
+  lcd_clear_home();
   delay(10);
   //Contrast
   HWSERIAL.write(0xFE);
   HWSERIAL.write(0x91);
   HWSERIAL.write(180);
   //RGB
-  HWSERIAL.write(0xFE);
-  HWSERIAL.write(0xD5);
-  HWSERIAL.write(160);
-  HWSERIAL.write(20);
-  HWSERIAL.write(210);
+  backlight_green();
   delay(10);
 }
 
-
 void loop()                     
 {
+  char digit[17];
   //
   // Scan input switch states
   //
@@ -357,13 +554,30 @@ void loop()
     switch_scan_timer = 0;
     run_debounce_switches();
     if(run_edge_rising)
-    {
+    {     
       Serial.println("Run Switch Released");
       run_edge_rising = false;
     }
     if(run_edge_falling)
     {
+      float temp_set = 200.0;
+      lcd_home();
+      if(temp_control_enabled)
+      {
+        temp_control_enabled = false;
+        backlight_green();
+      }
+      else
+      {
+        temp_control_enabled = true;
+        set_process_control_target(&temp_sensor2, temp_set_low, temp_set_high, 12);
+        Serial.println("Temperature control enabled");
+        toggle_blue = true;
+        toggle_red = true;
+      }
       Serial.println("Run Switch Pressed");
+      Serial.print("Set Temp to:  ");
+      Serial.println(temp_set);
       run_edge_falling = false;
     }
     if(mode_edge_rising)
@@ -373,35 +587,26 @@ void loop()
     }
     if(mode_edge_falling)
     {
-      Serial.println("Mode Switch Pressed");
+      lcd_home();
+      Serial.print("Mode Switch Pressed:  ");
       mode_edge_falling = false;
+      current_mode++;
+      set_process_control_target(&temp_sensor2, temp_set_low, temp_set_high, 12); //update every mode change
+      if(current_mode >= MAX_MODES)
+      {
+        current_mode = 0;
+      }
+      Serial.println(current_mode);
     }
 
   }
   
   //
-  //Run the clock
+  // Run the clock
   //
-  if(run_time >= 1000)
+  if(temp_control_enabled)
   {
-    
-    run_time = run_time - 1000;
-    seconds += 1;
-    if(seconds >= 60)
-    {
-      seconds = 0;
-      minutes += 1;
-      if(minutes >= 60)
-      {
-        minutes = 0;
-        hours += 1;
-        if(hours >= 24)
-        {
-          hours = 0;
-          days += 1;
-        }
-      }
-    }
+    run_clock();
   }
 
   //
@@ -409,115 +614,78 @@ void loop()
   //
   if(sample_timer >= sample_period)
   {
-    // DEBUG:  To see if ever the loop fails to complete within the same sample_period
     sample_timer = 0;
-    
-    //Scan temperature set point pot
-        if(!mode_state)
+    switch (current_mode)
     {
-      float temp_set = analogRead(1)/4095.0;
-      temp_set = 50.0 + 300.0*temp_set;
-      set_process_control_target(&temp_sensor2, temp_set, 4.0, 12);
-    }
+        
+      case MODE_SET_MIN_TEMP:
+        temp_set_low = 50.0 + analogRead(1)*(300.0/4095.0);
+        if(temp_set_high < temp_set_low)
+          temp_set_high = temp_set_low + 1.0;
+        //Print to display
+        if(counter++ > SAMPLE_RATE/4)
+        {
+          lcd_home();
+          HWSERIAL.println("LOW     HIGH");
+          lcd_print_temperature_F(temp_set_low);
+          HWSERIAL.print(" ");
+          lcd_print_temperature_F(temp_set_high);
+          counter = 0;
+        }
+      break;
+
+      case MODE_SET_MAX_TEMP:
+        temp_set_high = 50.0 + analogRead(1)*(300.0/4095.0);
+        if(temp_set_high < temp_set_low)
+          temp_set_low = temp_set_high - 1.0;
+        //Print to display
+        if(counter++ > SAMPLE_RATE/4)
+        {
+          lcd_home();
+          HWSERIAL.println("LOW     HIGH");
+          lcd_print_temperature_F(temp_set_low);
+          HWSERIAL.print(" ");
+          lcd_print_temperature_F(temp_set_high);
+          counter = 0;
+        }
+      break;
+      
+      case MODE_SET_RUN_TIME:
+        ticker = 20*analogRead(1);
+        secs2dhms(ticker);
+        //print to display
+        if(counter++ > SAMPLE_RATE/4)
+        {
+          lcd_home();
+          sprintf(digit, "%02u d, ", (unsigned) days);
+          HWSERIAL.print(digit);
+          sprintf(digit, "%02u:", (unsigned) hours);
+          HWSERIAL.print(digit);
+          sprintf(digit, "%02u:", (unsigned) minutes);
+          HWSERIAL.print(digit);
+          sprintf(digit, "%02u", (unsigned) seconds);
+          HWSERIAL.print(digit);
+          counter = 0;
+        }
+      break;
+      
+      case MODE_RUNNING:
+        //Run process controller on the temperature sensor
+        run_process_control(&temp_sensor2, (uint32_t) analogRead(2));
     
-    //Run process controller on the temperature sensor
-    run_process_control(&temp_sensor2, (uint32_t) analogRead(2));
-
-    if(counter++ > SAMPLE_RATE)
-    {
-      char digit[17];
-      float current_temperature = count_to_temp(&temp_sensor2, temp_sensor2.process_variable_cnts, 12+SHIFT);
-      counter = 0;
-
-      Serial.print(current_temperature);
-
-      //Print Temperature
-      HWSERIAL.write(0xFE);
-      HWSERIAL.write(0x48);
-      //delay(10);
-
-      //Format temperature output (sprint with float seems to not work correctly on LC, so conversion to ints is being used)
-      HWSERIAL.print("PV: ");
-      sprintf(digit, "%03d.", (int) (floorf(current_temperature)) );
-      HWSERIAL.print(digit);
-      sprintf(digit, "%01d", (int) ((current_temperature - floorf(current_temperature))*10.0) );
-      HWSERIAL.print(digit);
-
-      //Degree symbol followed by F      
-      HWSERIAL.write(0xDF);
-      HWSERIAL.println("F");
-
-      if(toggle_display)
-      {
-        toggle_display = false;
-        //Print Time
-        sprintf(digit, "%02u d, ", days);
-        HWSERIAL.print(digit);
-        sprintf(digit, "%02u:", hours);
-        HWSERIAL.print(digit);
-        sprintf(digit, "%02u:", minutes);
-        HWSERIAL.print(digit);
-        sprintf(digit, "%02u", seconds);
-        HWSERIAL.print(digit);      
-
-        sprintf(digit, " %03d.", (int) (floorf(temp_sensor2.set_point_degreesF)) );
-        Serial.print(digit);
-        sprintf(digit, "%01d", (int) ((temp_sensor2.set_point_degreesF - floorf(temp_sensor2.set_point_degreesF))*10.0) );
-        Serial.println(digit);
-      } else
-      {
-        toggle_display = true;
-        //Print process set point
-        HWSERIAL.print("SP: ");
-        sprintf(digit, "%03d.", (int) (floorf(temp_sensor2.set_point_degreesF)) );
-        HWSERIAL.print(digit);
-        Serial.print(" ");
-        Serial.print(digit);
-        sprintf(digit, "%01d", (int) ((temp_sensor2.set_point_degreesF - floorf(temp_sensor2.set_point_degreesF))*10.0) );
-        HWSERIAL.print(digit);
-        Serial.println(digit);
-        
-        //Degree symbol followed by F      
-        HWSERIAL.write(0xDF);
-        HWSERIAL.println("F");
-        //HWSERIAL.print(" ");
-      }
-
-      if(temp_sensor2.throttle)
-      {
-        digitalWrite(ledPin, HIGH);
-
-        if(toggle_red)
+        if(temp_control_enabled)
+          apply_process_state(&temp_sensor2);    
+    
+    
+        if(counter++ > SAMPLE_RATE)
         {
-          //RGB
-          HWSERIAL.write(0xFE);
-          HWSERIAL.write(0xD5);
-          HWSERIAL.write(225);
-          HWSERIAL.write(10);
-          HWSERIAL.write(10);
+          display_running_process_state(&temp_sensor2);
+          counter = 0;
         }
-        toggle_red = false;
-        toggle_blue = true;
-        
-      }
-      else
-      {
-         digitalWrite(ledPin, LOW);
+      break;
 
-        if(toggle_blue)
-        {
-          //RGB
-          HWSERIAL.write(0xFE);
-          HWSERIAL.write(0xD5);
-          HWSERIAL.write(160);
-          HWSERIAL.write(20);
-          HWSERIAL.write(210);
-        }
-        toggle_blue = false;
-        toggle_red = true;
-      }
-      // Debug:  to see if it ever takes more than 1ms to complete this task
-      //Serial.println(sample_timer);
+      default:
+      break;
     }
     
   }
