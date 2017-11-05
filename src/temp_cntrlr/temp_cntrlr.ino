@@ -223,7 +223,7 @@ void run_debounce_switches()
   else
   {
     run_integrator--;
-    if(run_integrator < 1) 
+    if(run_integrator < 1)
     {
       run_integrator = 1;
       if(run_state)
@@ -234,7 +234,7 @@ void run_debounce_switches()
       run_state = false;
     }
   }
-  
+
   if(digitalRead(mode_switch))
   {
     mode_integrator++;
@@ -252,7 +252,7 @@ void run_debounce_switches()
   else
   {
     mode_integrator--;
-    if(mode_integrator < 1) 
+    if(mode_integrator < 1)
     {
       mode_integrator = 1;
       if(mode_state)
@@ -262,8 +262,8 @@ void run_debounce_switches()
       }
       mode_state = false;
     }
-  }    
-  
+  }
+
 }
 
 //
@@ -358,7 +358,7 @@ void lcd_print_temperature_F(float degreesF)
   sprintf(digit, "%01d", (int) ((degreesF - floorf(degreesF))*10.0) );
   HWSERIAL.print(digit);
 
-  //Degree symbol followed by F      
+  //Degree symbol followed by F
   HWSERIAL.write(0xDF);
   HWSERIAL.print("F");
 }
@@ -380,7 +380,7 @@ void apply_process_state(thstr_vars *th)
       }
       toggle_red = false;
       toggle_blue = true;
-      
+
     }
     else
     {
@@ -397,7 +397,7 @@ void apply_process_state(thstr_vars *th)
     }
 }
 
-  
+
 void secs2dhms(uint32_t ticks_)
 {
     uint32_t ds, hrs, mns, scs;
@@ -460,7 +460,7 @@ void display_running_process_state(thstr_vars *th)
     sprintf(digit, "%02u:", (unsigned) minutes);
     HWSERIAL.print(digit);
     sprintf(digit, "%02u  ", (unsigned) seconds);
-    HWSERIAL.print(digit);    
+    HWSERIAL.print(digit);
 
     sprintf(digit, " %03d.", (int) (floorf(th->set_point_high_degreesF)) );
     Serial.print(digit);
@@ -489,15 +489,24 @@ void run_clock()
   if(run_time >= 1000)
   {
     if(ticker > 0)
+    {
       ticker--;
+    }
+    else if(temp_control_enabled )
+    {
+        temp_control_enabled = false;
+        digitalWrite(ledPin, LOW);
+        backlight_green();
+    }
+
     secs2dhms(ticker);
    run_time = 0;
   }
 }
 
 void setup()
-{   
-  analogReadResolution(12);           
+{
+  analogReadResolution(12);
   Serial.begin(38400);
   HWSERIAL.begin(9600);
   counter = 0;
@@ -527,7 +536,7 @@ void setup()
   toggle_blue = true;
   toggle_red = true;
   current_mode = 0;
- 
+
   //Disable auto scroll mode
   HWSERIAL.write(0xFE);
   HWSERIAL.write(0x52);
@@ -543,7 +552,7 @@ void setup()
   delay(10);
 }
 
-void loop()                     
+void loop()
 {
   char digit[17];
   //
@@ -554,7 +563,7 @@ void loop()
     switch_scan_timer = 0;
     run_debounce_switches();
     if(run_edge_rising)
-    {     
+    {
       Serial.println("Run Switch Released");
       run_edge_rising = false;
     }
@@ -565,6 +574,7 @@ void loop()
       if(temp_control_enabled)
       {
         temp_control_enabled = false;
+        digitalWrite(ledPin, LOW);
         backlight_green();
       }
       else
@@ -600,7 +610,7 @@ void loop()
     }
 
   }
-  
+
   //
   // Run the clock
   //
@@ -615,9 +625,17 @@ void loop()
   if(sample_timer >= sample_period)
   {
     sample_timer = 0;
+
+    // Always run process controller on the temperature sensor
+    run_process_control(&temp_sensor2, (uint32_t) analogRead(2));
+    if(temp_control_enabled)
+    {
+      apply_process_state(&temp_sensor2);
+    }
+
     switch (current_mode)
     {
-        
+
       case MODE_SET_MIN_TEMP:
         temp_set_low = 50.0 + analogRead(1)*(300.0/4095.0);
         if(temp_set_high < temp_set_low)
@@ -649,7 +667,7 @@ void loop()
           counter = 0;
         }
       break;
-      
+
       case MODE_SET_RUN_TIME:
         ticker = 20*analogRead(1);
         secs2dhms(ticker);
@@ -668,15 +686,8 @@ void loop()
           counter = 0;
         }
       break;
-      
+
       case MODE_RUNNING:
-        //Run process controller on the temperature sensor
-        run_process_control(&temp_sensor2, (uint32_t) analogRead(2));
-    
-        if(temp_control_enabled)
-          apply_process_state(&temp_sensor2);    
-    
-    
         if(counter++ > SAMPLE_RATE)
         {
           display_running_process_state(&temp_sensor2);
@@ -687,9 +698,9 @@ void loop()
       default:
       break;
     }
-    
+
   }
-  
-  
+
+
 
 }
