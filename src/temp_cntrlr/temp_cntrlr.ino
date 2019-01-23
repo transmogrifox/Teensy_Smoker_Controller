@@ -125,7 +125,7 @@ float temp_to_volt(thstr_vars* th, float temp)
 
 uint32_t volt_to_counts(thstr_vars* th, float volt, uint8_t nbits)
 {
-    return (uint32_t) ( (volt/th->vref)*(powf(2.0, (float) nbits) ) - 1);
+    return (uint32_t) ( (volt/th->vref)*(powf(2.0, (float) nbits)*th->rcal ) - 1);
 }
 
 //Set up process control set points.
@@ -133,8 +133,8 @@ uint32_t volt_to_counts(thstr_vars* th, float volt, uint8_t nbits)
 //  hysteresis is total min-max variation
 void set_process_control_target(thstr_vars* th, float min_, float max_, uint8_t nbits)
 {
-    float maxval = temp_to_volt(th, max_);
-    float minval = temp_to_volt(th, min_);
+    float maxval = temp_to_volt(th, max_- th->offset);
+    float minval = temp_to_volt(th, min_- th->offset);
     //printf("min:  %f\nmax: %f\nt: %f\n", min, max, temp_to_volt(th, target));
     th->set_point_high_degreesF = max_;
     th->set_point_low_degreesF = min_;
