@@ -54,6 +54,7 @@ elapsedMillis seconds_timer;
 static volatile uint32_t sample_period;
 static volatile uint8_t minutes_timer;
 static volatile uint8_t timer_scanner;
+static volatile uint8_t hyst_knob_turning;
 
 thstr_vars tempsensor;  // placed in vicinity to food being cooked or smoked
 thstr_vars element_temp;  // placed near to the heating element for minimum thermal time constant
@@ -126,10 +127,14 @@ void flip_lcd_buffer()
   }
 }
 
-void lcd_update_status(float setp, float pvar, float tvar, bool hyst)
+void lcd_update_status(float setp, float pvar, float tvar, bool hyst, uint8_t hyst_knob)
 {
 
-  sprintf(&lcd_buffer[0], "S%03d.", (int) (floorf(setp)) );
+  if(hyst_knob > 0)
+    sprintf(&lcd_buffer[0], "H%03d.", (int) (floorf(setp)) );
+  else
+    sprintf(&lcd_buffer[0], "S%03d.", (int) (floorf(setp)) );
+  
   sprintf(&lcd_buffer[5], "%01d ", (int) ((setp - floorf(setp))*10.0) );
 
   sprintf(&lcd_buffer[7], "P%03d.", (int) (floorf(pvar)) );
@@ -208,12 +213,12 @@ void setup()
   //Circuit params
   float k = 1000.0;
   float m = 1.0/k;
-  float r1 = 3520.0;
-  float r2 = 750.0;
+  float r1 = 18520.0;
+  float r2 = 1750.0;
   float r3 = 150;
-  float c1 = 650*m;
+  float c1 = 500*m;
   float c2 = c1/20.0;
-  float c3 = 250*m;
+  float c3 = 550*m;
   float pg = cws/(500.0*k);
   init_compensator(comp, cfs);
   set_circuit_params(comp, r1, r2, r3, c1, c2, c3, pg);
@@ -234,6 +239,7 @@ void setup()
   seconds_timer = 0;
   minutes_timer = 0;
   timer_scanner = 0;
+  hyst_knob_turning = 0;
 
   digitalWrite(RELAY, 0); 
   digitalWrite(RELAY_, 1);
@@ -323,7 +329,7 @@ void loop()
       pot_timer = 4096 - analogRead(9);
 
       set_point = 50.0 + (pot_set_point/4096.0)*200.0;
-      hysteresis = (pot_hysteresis/4096.0)*20.0 - 2.0;
+      hysteresis = (pot_hysteresis/4096.0)*20.0 - 0.5;
       if(hysteresis < 0.0) hysteresis = 0.0;
       
       // Evaluate if changed significantly
@@ -334,8 +340,9 @@ void loop()
         Serial.print("Set Point:  ");
         Serial.println(set_point);
       }
-      if(abs(pot_hysteresis - pot_hysteresis_l) > 10)
+      if(abs(pot_hysteresis - pot_hysteresis_l) > 5)
       {
+          hyst_knob_turning = 4;
 //        hysteresis = (pot_hysteresis/4096.0)*20.0;
 //        Serial.println();
 //        Serial.print("New Hysteresis:  ");
@@ -387,7 +394,16 @@ void loop()
       lcd_home();
       
        //Output to LCD
-     lcd_update_status(set_point, tempF_pv, time_remaining, running_hysteretic);
+     if(hyst_knob_turning > 0)
+     {
+      lcd_update_status(hysteresis, tempF_pv, time_remaining, running_hysteretic, hyst_knob_turning);
+      hyst_knob_turning--;
+      
+     }
+     else
+     {
+      lcd_update_status(set_point, tempF_pv, time_remaining, running_hysteretic, hyst_knob_turning);
+     }
 
       if(time_remaining > 2.0/60.0)
       {
