@@ -131,8 +131,8 @@ void setup_thstr(thstr_vars* th, float beta, float r0, float t0, float vref, flo
 
     //Control system variables
     th->set_point_degreesF = 200.0;
-    th->set_point_max = 0.0;
-    th->set_point_min = 0.0;
+    th->set_point_max = 210.0;
+    th->set_point_min = 190.0;
 
     th->process_variable_cnts = 0;
     th->process_variable_raw = 0;
@@ -167,7 +167,7 @@ void set_process_control_target(thstr_vars* th, float target, float hysteresis)
     th->set_point_max = target + hyst;
     th->set_point_min = target - hyst;
 
-    th->throttle = false;
+    //th->throttle = false;
 }
 
 //
