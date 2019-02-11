@@ -37,6 +37,8 @@ volatile static bool enable_heating;
 volatile int32_t pot_set_point;
 volatile int32_t pot_hysteresis;
 volatile int32_t pot_timer;
+volatile int32_t pot_smoke;
+volatile int32_t smoke_duty_counter;
 volatile int32_t pot_set_point_l;
 volatile int32_t pot_hysteresis_l;
 volatile int32_t pot_timer_l;
@@ -44,6 +46,7 @@ volatile bool running_hysteretic;
 
 volatile float set_point;
 volatile float hysteresis;
+volatile float smoke_duty;
 volatile float time_remaining;
 
 volatile float err;
@@ -64,6 +67,7 @@ thstr_vars* pelement_temp = &element_temp;
 
 const int RELAY = 13;
 const int RELAY_ = 12;
+const int SMOKE_RELAY = 6;
 
 //LCD Communication
 // Serial LCD Output
@@ -184,6 +188,7 @@ void setup()
   delay(10);
     
   pinMode(RELAY, OUTPUT);
+  pinMode(SMOKE_RELAY, OUTPUT);
   digitalWrite(RELAY, 0);
   pinMode(RELAY_, OUTPUT);
   digitalWrite(RELAY_, 1);
@@ -224,15 +229,18 @@ void setup()
   set_circuit_params(comp, r1, r2, r3, c1, c2, c3, pg);
 
   //Initialize input readings
+  pot_smoke = analogRead(6);
   pot_set_point = 4096 - analogRead(8);
   pot_hysteresis = 4096 - analogRead(7);
   pot_timer = 4096 - analogRead(9);
   pot_set_point_l = pot_set_point;
   pot_hysteresis_l = pot_hysteresis;
   pot_timer_l = pot_timer; 
+  smoke_duty_counter = 0;
 
   set_point = 50.0 + (pot_set_point/4096.0)*200.0;
   hysteresis = (pot_set_point/4096.0)*20.0;
+  smoke_duty = ((float) pot_smoke)/4095.0;
   heating_active = 0;
   enable_heating = 0;
   time_remaining = 0;
@@ -241,6 +249,7 @@ void setup()
   timer_scanner = 0;
   hyst_knob_turning = 0;
 
+  digitalWrite(SMOKE_RELAY, 0);
   digitalWrite(RELAY, 0); 
   digitalWrite(RELAY_, 1);
 
@@ -270,6 +279,22 @@ void loop()
   {
     sample_timer = 0;
 
+    smoke_duty_counter += 32;
+    if(smoke_duty_counter >= 4095)
+    {
+      smoke_duty_counter = 0;
+      if(time_remaining > 2.0/60.0)
+      {
+        digitalWrite(SMOKE_RELAY, 1);
+        Serial.println("smoke on");
+      }
+      else
+        digitalWrite(SMOKE_RELAY, 0);
+    }
+    if(smoke_duty_counter > pot_smoke)
+    {
+      digitalWrite(SMOKE_RELAY, 0);
+    }
    
     //Get value from ADC with thermistor
     val = analogRead(2); //chamber temperature
@@ -313,6 +338,12 @@ void loop()
       digitalWrite(RELAY_, !(pelement_temp->throttle));
       heating_active = pelement_temp->throttle;
     }
+    else
+    {
+      digitalWrite(RELAY, 0); 
+      digitalWrite(RELAY_, 1);
+      heating_active = 0;
+    }
 
     
     if(++counter >= SAMPLE_RATE/4)
@@ -324,13 +355,20 @@ void loop()
       pot_hysteresis_l = pot_hysteresis;
       pot_timer_l = pot_timer; 
       // Get new control knob inputs
-      pot_set_point = 4096 - analogRead(8);
+      pot_smoke = 4096 - analogRead(6);
       pot_hysteresis = 4096 - analogRead(7);
+      pot_set_point = 4096 - analogRead(8);
       pot_timer = 4096 - analogRead(9);
 
       set_point = 50.0 + (pot_set_point/4096.0)*200.0;
       hysteresis = (pot_hysteresis/4096.0)*20.0 - 0.5;
-      if(hysteresis < 0.0) hysteresis = 0.0;
+      if(hysteresis < 0.0) 
+        hysteresis = 0.0;
+      smoke_duty = ((float) pot_smoke)/4095;
+      Serial.println();
+      Serial.print("Smoke Duty:  ");
+      Serial.print(smoke_duty*100.0);
+      Serial.println(" %");
       
       // Evaluate if changed significantly
       if(abs(pot_set_point - pot_set_point_l) > 10)
@@ -409,8 +447,8 @@ void loop()
       {
        if(pelement_temp->throttle) 
        {
-          backlight_red();
           enable_heating = 1;
+          backlight_red();
        }
        else
        {
@@ -423,13 +461,6 @@ void loop()
         backlight_green();
         enable_heating = 0;
       }
-      
-
-          
-      
-    }
-    
+    }  
   }
-  
-
 }
