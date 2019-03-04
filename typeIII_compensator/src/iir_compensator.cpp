@@ -3,34 +3,6 @@
 
 #include "iir_compensator.hpp"
 
-//
-//  MATLAB Filter prototype definition
-//
-    // % IIR filter gain
-    // gya = (z0 + kz)./(p0 + kz);
-    // gyb = 1./(pg + kz);
-    // gyc = (-1/r3)*kz./(kz + p1);
-    // gff = (-1/r2);
-    //
-    // % IIR Coefficients for feedback impedance filters
-    // a0 = (z0 - kz)./(z0 + kz);
-    // b0 = (kz - p0)./(p0 + kz);
-    // b1 = (kz - pg)./(pg + kz);
-    // b2 = (kz - p1)./(kz + p1);
-    //
-    // % IIR filters for the feedback impedance
-    // ya = (1 + a0.*z1)./(1 - b0.*z1);
-    // yb = (1 + z1)./(1 - b1.*z1);
-    //
-    // % Result of two cascaded stages with gain
-    // yfb = g0.*gya.*gyb.*ya.*yb;
-    //
-    // % Injection impedance IIR filter
-    // yc = (1 - z1)./(1 - b2*z1);
-    //
-    // % Final compensator filter, cascade and sum
-    // Hz = gff.*yfb + gyc.*yc.*yfb;
-
 float
 run_filter_one_pole(iir_coeffs* cf, float x)
 {
@@ -151,11 +123,14 @@ set_sampling_params(iir_comp* f, float fs, float warp)
 float
 run_compensator(iir_comp* f, float x)
 {
-    float yfb = run_filter_one_pole(&(f->ya), x);
-    float yc = yfb;
-    yfb = f->g0*f->gya*f->gyb*run_filter_one_pole(&(f->yb), yfb);
-    yc = run_filter_one_pole(&(f->yc), yfb);
+    // Sum of currents entering op amp inverting terminal
+    float yc = x*f->gff + f->gyc*run_filter_one_pole(&(f->yc), x);
 
-    return f->gff*yfb + f->gyc*yc;
-    //return yfb;
+    // Input currents convolved with feedback impedance
+    float ya = f->gya*run_filter_one_pole(&(f->ya), yc); // Pole + Zero formed by R1*C1 and R1*C2
+    float yfb = f->gyb*run_filter_one_pole(&(f->yb), ya); // Low frequency pole formed by max gain
+    yfb *= f->g0;
+
+    return yfb;
+
 }

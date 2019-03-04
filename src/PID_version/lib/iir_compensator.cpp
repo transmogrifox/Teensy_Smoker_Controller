@@ -69,7 +69,7 @@ set_poles_zeros_direct(iir_comp* f, float z0, float p0, float p1, float pg, floa
 }
 
 void
-set_circuit_params(iir_comp* f, float r1, float r2, float r3, float c1, float c2, float c3, float pg)
+set_circuit_params(iir_comp* f, float r1, float r2, float r3, float c1, float c2, float c3, float pg, float sat_low, float sat_high)
 {
     float kz = f->kz;
 
@@ -84,6 +84,19 @@ set_circuit_params(iir_comp* f, float r1, float r2, float r3, float c1, float c2
     f->gyc = (-1.0/r3)*kz/(kz + f->p1);
     f->gff = (-1.0/r2);
 
+    if(sat_low < sat_high)
+    {
+        f->sat_high = sat_high;
+        f->sat_low = sat_low;
+        f->do_saturation = 1;
+    }
+    else
+    {
+        f->sat_high = 0.0;
+        f->sat_low = 0.0;
+        f->do_saturation = 0;
+    }
+
     compute_filter_coeffs(f);
 }
 
@@ -97,6 +110,11 @@ init_compensator(iir_comp* f, float fs)
     f->z0 = 2.0*M_PI*f->fs/100.0;;
     f->p0 = f->p0*10.0;
     f->p1 = f->z0/2.0;
+
+    f->sat_low = 0.0;
+    f->sat_high = 0.0;
+    f->sv_sat = 0.0;
+    f->do_saturation = 0;
 
     compute_filter_coeffs(f);
     init_state_variables(f);
@@ -123,13 +141,26 @@ set_sampling_params(iir_comp* f, float fs, float warp)
 float
 run_compensator(iir_comp* f, float x)
 {
+    // Evaluate saturation
+    float xin = x + f->sv_sat;
     // Sum of currents entering op amp inverting terminal
-    float yc = x*f->gff + f->gyc*run_filter_one_pole(&(f->yc), x);
+    float yc = xin*f->gff + f->gyc*run_filter_one_pole(&(f->yc), xin);
 
     // Input currents convolved with feedback impedance
     float ya = f->gya*run_filter_one_pole(&(f->ya), yc); // Pole + Zero formed by R1*C1 and R1*C2
     float yfb = f->gyb*run_filter_one_pole(&(f->yb), ya); // Low frequency pole formed by max gain
     yfb *= f->g0;
+
+    // It will remain zero unless evaluating saturation is active
+    // and if it is beyond saturation limits
+    f->sv_sat = 0.0;
+    if(f->do_saturation)
+    {
+        if(yfb > f->sat_high)
+            f->sv_sat = f->sat_high - yfb;
+        else if (yfb < f->sat_low)
+            f->sv_sat = f->sat_low - yfb;
+    }
 
     return yfb;
 

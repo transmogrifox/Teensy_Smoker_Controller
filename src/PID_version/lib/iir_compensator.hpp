@@ -2,7 +2,8 @@
 #ifndef IIR_COMP_H
 #define IIR_COMP_H
 
-typedef struct iir_coeffs_t {
+typedef struct iir_coeffs_t
+{
     float b0;
     float a0;
     float a1;
@@ -31,6 +32,12 @@ typedef struct iir_comp_t
     float p1;   //conpensator RC injection pole
     float pg;   //low frequency pole of finite-gain integrator
                 //relates to compensator DC gain
+
+    // Saturation
+    bool do_saturation;
+    float sat_high;
+    float sat_low;
+    float f->sv_sat;
 
     // IIR coefficients and state variables
     iir_coeffs ya;
@@ -76,9 +83,14 @@ void set_poles_zeros_direct(iir_comp* f, float z0, float p0, float p1, float pg,
 //  r2  : input feed resistor from signal input to op amp inverting terminal
 //  r3  : input feed resistor for differentiator feed path, in series with c3
 //  c3  : forms pole with r3.  r3 + c3 series connected from input to op amp inverting terminal
+//  pg  : emulating a physical high gain system -- this would be the low-frequency pole related to the gain-bandwidth product
+//        and open-loop DC gain of the amplifier
+//  sat_low :
+//  sat_high: min and max output values (system saturation) to avoid excessive wind-up delay.
+//            if sat_low is greater than or equal to sat_high then the saturation function is disabled
 //
 
-void set_circuit_params(iir_comp* f, float r1, float r2, float r3, float c1, float c2, float c3, float pg);
+void set_circuit_params(iir_comp* f, float r1, float r2, float r3, float c1, float c2, float c3, float pg, float sat_low, float sat_high);
 
 // Configure sampling params
 //
